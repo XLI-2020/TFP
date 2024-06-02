@@ -2,7 +2,7 @@
 
 
 
-This is the repository of TFP project which consists of code, datasets, instructions to reproduce experimental results.
+This is the repository of TFP project which consists of code, datasets, instructions to help reproduce experimental results.
 
 
 # Implementation Details 
@@ -18,7 +18,7 @@ This is the repository of TFP project which consists of code, datasets, instruct
 - codecarbon 2.3.4
 
 You may use " pip3 install -r requirements.txt" to install the above python libraries.
-Notably, Docker is in need to help create Kafka data streams.
+Notably, Docker is in need to help create Kafka data streams. 
 
 ### Usage
 
@@ -35,12 +35,13 @@ python3 produceKafkaStream.py --dataset Motion --miss_ratio 0.9 # produce a sens
 *wTFP/wTFPd*
 
 ``` 
-python3 imputeStream_wTFP.py --p 10 --tau 5; p: the numer of new instances, tau: retrospect length 
+python3 imputeStream_wTFP.py --p 10 --tau 5; 
 ``` 
 
 *baselines*
 
 ``` 
+cd baseline;
 python3 imputeStream_CD.py --p 10; #CD
 python3 imputeStream_mpin.py --p 10; #mpin
 python3 imputeStream_MICE.py --p 10; #MICE
@@ -48,12 +49,13 @@ python3 imputeStream_MF.py --p 10; #MF
 ....
 
 ``` 
-The performance results are stored in the folder: ./exp_results/. For other method-specific parameters (e.g., K value for KNN), they are tuned to a proper value. 
+The performance results are stored in the default folder: ./exp_results/. For method-specific parameters (e.g., K value for KNN), they are already tuned properly. 
+However, they can be changed as well from the script entrance if needs arise.
 
 ***Close the sensor data stream***: 
 ```
 cd kafka; 
-docker compose down;
+docker compose down; # close Kafka engine
 ```
 
 
@@ -68,7 +70,7 @@ docker compose down;
 
 ### Acknowledgements
 
-We appreciate the work of SAITS, and their contributed codes available in [here](https://github.com/WenjieDu/SAITS).
-
+We appreciate the work of SAITS, and their contributed codes available in [here](https://github.com/WenjieDu/SAITS). We are also grateful for the repository 
+[here](https://github.com/XLI-2020/time-series-kafka-demo) to facilitate the creation of sensor data streams using Kafka.
 
 
