@@ -2,7 +2,7 @@
 
 
 
-This is the repository of TFP project which consists of code, datasets, instructions to help reproduce experimental results.
+This is the repository of TFP project which consists of code, datasets, instructions for reproducibility.
 
 
 # Implementation Details 
