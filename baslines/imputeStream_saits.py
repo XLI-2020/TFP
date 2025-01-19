@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Impute data stream with SAITS
+"""Consumes stream for printing all messages to the console.
 """
 
 import argparse
@@ -16,6 +16,8 @@ from datetime import datetime
 import tracemalloc
 import os
 from pypots.data import load_specific_dataset, mcar, masked_fill
+from pygrinder import mcar
+
 from pypots.imputation import SAITS, BRITS
 import torch
 import torch.nn.functional as F
@@ -23,6 +25,19 @@ from argparse import ArgumentParser
 from pypots.utils.metrics import cal_mae, cal_rmse, cal_mre
 import sys
 from codecarbon import EmissionsTracker
+
+
+def read_config():
+  # reads the client configuration from client.properties
+  # and returns it as a key-value map
+  config = {}
+  with open("client.properties") as fh:
+    for line in fh:
+      line = line.strip()
+      if len(line) != 0 and line[0] != "#":
+        parameter, value = line.strip().split('=', 1)
+        config[parameter] = value.strip()
+  return config
 
 
 def get_model_size(model):
@@ -61,6 +76,8 @@ def msg_process(msg):
     time_start = time.strftime("%Y-%m-%d %H:%M:%S")
     print('msg', type(msg))
 
+    # test_value = list(map(lambda x:json.loads(x.value())['test'], msg))
+    # true_value = list(map(lambda x:json.loads(x.value())['truth'], msg))
 
     loaded_js = json.loads(msg.value())
 
@@ -111,18 +128,21 @@ def msg_process(msg):
         X = torch.FloatTensor(X).to(device)
         X_mask = torch.LongTensor(X_mask).to(device)
         X = X.view(-1, args.step_len, in_channels)
+
         X_mask = X_mask.view(-1, args.step_len, in_channels)
 
         X = masked_fill(X, X_mask, np.nan)
 
 
-        # Model training for imputation
+        # Model training. This is PyPOTS showtime.
+
+
         imputer = SAITS(n_steps=args.step_len, n_features=in_channels, n_layers=2, d_model=256, d_inner=128, n_head=4, d_k=64, d_v=64, dropout=0.1, epochs=100, device=device)
 
         st = datetime.now()
 
-        imputer.fit(X)
-        imputation = imputer.impute(X)
+        imputer.fit(X)  # train the model. Here I use the whole dataset as the training set, because ground truth is not visible to the model.
+        imputation = imputer.impute(X)  # impute the originally-missing values and artificially-missing values
 
         current_time = datetime.now()
         elapsed_time = (current_time - st).total_seconds()*1000
@@ -146,7 +166,7 @@ def msg_process(msg):
         mae_error = cal_mae(test_X, true_X, test_mask)
         print('mae_error', mae_error)
 
-        mse_eror = cal_rmse(test_X, true_X, test_mask)
+        mse_eror = cal_rmse(test_X, true_X, test_mask)  # calculate mean absolute error on the ground truth (artificially-missing values)
 
         mre_error = cal_mre(test_X, true_X, test_mask)
 
@@ -159,6 +179,8 @@ def msg_process(msg):
         model_size = get_model_size(imputer.model)
         print('SAITS Model Size:', model_size)
 
+        # print('valid impute value samples:', (test_X[torch.where(test_mask == 1)][:10]))
+        # print('valid true value samples:', (true_X[torch.where(test_mask == 1)][:10]))
 
         mae_error_stream.append(round(mae_error.item(), 4))
         mse_error_stream.append(round(mse_eror.item(), 4))
@@ -183,14 +205,16 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=100)
     # parser.add_argument("--k", type=int, default=3)
 
+    period = 10
+    window = period + 40
 
 
     # parser.add_argument('--method', type=str, default=f'saits_p{period}', required=False, help='feature propagation')
 
-    parser.add_argument('--method', type=str, default=f'saits', required=False, help='feature propagation')
+    parser.add_argument('--method', type=str, default=f'saits-test', required=False, help='feature propagation')
 
-    # parser.add_argument("--window_len", type=int, default=window)
-    parser.add_argument("--p", type=int, default=10)
+    parser.add_argument("--window_len", type=int, default=window)
+    parser.add_argument("--period", type=int, default=period)
 
     parser.add_argument("--step_len", type=int, default=5)
 
@@ -216,20 +240,28 @@ if __name__ == "__main__":
     model_size = None
 
     args = parser.parse_args()
+    window_len = args.window_len
+    period = args.period
 
-    period = args.p
-    window = period + 150
-
-    window_len = copy.copy(window)
 
 
     torch.random.manual_seed(2021)
-    device = torch.device('cpu')
+    # device = torch.device('cpu')
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
     epochs = args.epochs
     dt_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    conf = {'bootstrap.servers': 'localhost:9092',
-            'default.topic.config': {'auto.offset.reset': 'smallest'},
-            'group.id':args.method} #'_'.join([args.method, dt_str])
+
+
+    # conf = {'bootstrap.servers': 'localhost:9092',
+    #         'default.topic.config': {'auto.offset.reset': 'smallest'},
+    #         'group.id':args.method} #'_'.join([args.method, dt_str])
+
+    conf = read_config()
+    conf["group.id"] = args.method
+    conf["auto.offset.reset"] = "earliest"
+
     consumer = Consumer(conf)
     running = True
     flag = 0

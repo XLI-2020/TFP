@@ -14,21 +14,34 @@ import resource
 import torch
 from resource import *
 import psutil
-from pypots.utils.metrics import cal_mae, cal_rmse, cal_mre
+from pypots.utils.metrics import calc_mae, calc_rmse, calc_mre
 
 import copy
 from datetime import datetime
 import tracemalloc
 import os
 from codecarbon import EmissionsTracker
-from utils.cd_modules.recovery import centroid_recovery
+from recovery import centroid_recovery
 
 
+
+def read_config():
+  # reads the client configuration from client.properties
+  # and returns it as a key-value map
+  config = {}
+  with open("client.properties") as fh:
+    for line in fh:
+      line = line.strip()
+      if len(line) != 0 and line[0] != "#":
+        parameter, value = line.strip().split('=', 1)
+        config[parameter] = value.strip()
+  return config
 
 def process_memory():
     process = psutil.Process(os.getpid())
     mem_info = process.memory_info()
     return mem_info.rss
+
 
 # decorator function
 def profile(func):
@@ -41,7 +54,6 @@ def profile(func):
         print("555, {}:consumed memory:", mem_before, mem_after, mem_after - mem_before)
         return result
     return wrapper
-
 
 
 def msg_process(msg):
@@ -79,7 +91,6 @@ def msg_process(msg):
     if len(window_data) < window_len:
         print('current window len', len(window_data))
     else:
-
         test_value = np.concatenate(test_value_list, axis=0)
         true_value = np.concatenate(true_value_list, axis=0)
         test_mask = ((~np.isnan(true_value)) ^ (~np.isnan(test_value))).astype(np.float32)
@@ -113,16 +124,22 @@ def msg_process(msg):
 
         true_X = copy.copy(true_value)
         true_X = np.nan_to_num(true_X, nan=0)
+        # true_X = torch.FloatTensor(true_X).to(device)
+        # print('true X tensor:', true_X)
 
+        # test_mask = torch.FloatTensor(test_mask).to(device)
         print('test_X true_X shpppp', test_X.shape, true_X.shape)
-        mae_error = cal_mae(test_X, true_X, test_mask)
+        mae_error = calc_mae(test_X, true_X, test_mask)
 
-        mse_eror = cal_rmse(test_X, true_X, test_mask)
+        mse_eror = calc_rmse(test_X, true_X, test_mask)
 
-        mre_error = cal_mre(test_X, true_X, test_mask)
+        mre_error = calc_mre(test_X, true_X, test_mask)
 
         print('valid impute value samples:', (test_X[np.where(test_mask == 1)][:10]))
         print('valid true value samples:', (true_X[np.where(test_mask == 1)][:10]))
+
+        # print('valid impute value samples:', (test_X[torch.where(test_mask == 1)][:10]))
+        # print('valid true value samples:', (true_X[torch.where(test_mask == 1)][:10]))
 
         mae_error_stream.append(round(mae_error.item(), 4))
         mse_error_stream.append(round(mse_eror.item(), 4))
@@ -146,9 +163,17 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--topic', type=str, help='Name of the Kafka topic to stream.', default='my-stream')
+    parser.add_argument("--k", type=int, default=3)
 
-    # parser.add_argument("--window_len", type=int, default=window)
-    parser.add_argument("--p", type=int, default=10)
+    period = 10
+    window = period + 150
+    truncate = 0 ### 0.3, 0.5, 0.7
+    # truncate = 1 ### 0.9
+
+
+    parser.add_argument("--window_len", type=int, default=window)
+    parser.add_argument("--period", type=int, default=period)
+
 
     parser.add_argument('--method', type=str, default=f'CD', required=False, help='feature propagation')
 
@@ -174,25 +199,29 @@ if __name__ == "__main__":
     miss_ratio = None
 
     args = parser.parse_args()
-
-    period = args.p
-    window = period + 150
-    truncate = 0  ### 0.3, 0.5, 0.7
-    # truncate = 1 ### 0.9
-    window_len = copy.copy(window)
+    window_len = args.window_len
+    period = args.period
 
 
     torch.random.manual_seed(2021)
     device = torch.device('cpu')
-    conf = {'bootstrap.servers': 'localhost:9092',
-            'default.topic.config': {'auto.offset.reset': 'smallest'},
-            'group.id': args.method}
+    # conf = {'bootstrap.servers': 'localhost:9092',
+    #         'default.topic.config': {'auto.offset.reset': 'smallest'},
+    #         'group.id': args.method}
+
+    conf = read_config()
+
+    conf["group.id"] = args.method
+    conf["auto.offset.reset"] = "earliest"
+
     consumer = Consumer(conf)
     running = True
     flag = 0
     try:
         while running:
             consumer.subscribe([args.topic])
+            # msg = consumer.consume(num_messages=6, timeout=-1)
+            # msg = consumer.consume(num_messages=1, timeout=-1)
 
             msg = consumer.poll(3)
             if msg is None or msg == []:
@@ -201,7 +230,7 @@ if __name__ == "__main__":
                     print('done!!! time:', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                     perform_stream = [mae_error_stream, mse_error_stream, mre_error_stream, elapsed_time_list]
                     perform_stream_df = pd.DataFrame(perform_stream, index=['mae', 'rmse', 'mre', 'time'], columns=index_stream).T
-                    # perform_stream_df.to_csv(f'./exp_results_detail/per_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv', sep='\t', index=True, header=True)
+                    perform_stream_df.to_csv(f'./exp_results_detail/per_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv', sep='\t', index=True, header=True)
                     avg_df = perform_stream_df.mean(axis=0).round(3)
                     avg_df = pd.DataFrame(avg_df).T
                     index_st = perform_stream_df.index[0]
@@ -221,7 +250,7 @@ if __name__ == "__main__":
 
                     imputed_data_arr = np.concatenate(imputed_data_stream, axis=0)
                     imputed_data_df = pd.DataFrame(imputed_data_arr, index=total_index_stream)
-                    # imputed_data_df.to_csv(f'./impute_detail/impu_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv', sep='\t', index=True, header=False)
+                    imputed_data_df.to_csv(f'./impute_detail/impu_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv', sep='\t', index=True, header=False)
 
                     break
             elif msg.error():

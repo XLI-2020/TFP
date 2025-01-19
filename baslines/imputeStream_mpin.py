@@ -14,12 +14,25 @@ import copy
 from datetime import datetime
 import tracemalloc
 import os
-from utils.mpin_modules.DynamicGNN import DynamicGCN, DynamicGAT, DynamicGraphSAGE, StaticGCN, StaticGraphSAGE, StaticGAT
+from models.DynamicGNN import DynamicGCN, DynamicGAT, DynamicGraphSAGE, StaticGCN, StaticGraphSAGE, StaticGAT
 from torch_geometric.nn import knn_graph
-from utils.mpin_modules.regressor import MLPNet
+from models.regressor import MLPNet
 import torch.optim as optim
 from pypots.utils.metrics import cal_mae, cal_rmse, cal_mre
 from codecarbon import EmissionsTracker
+
+def read_config():
+  # reads the client configuration from client.properties
+  # and returns it as a key-value map
+  config = {}
+  with open("client.properties") as fh:
+    for line in fh:
+      line = line.strip()
+      if len(line) != 0 and line[0] != "#":
+        parameter, value = line.strip().split('=', 1)
+        config[parameter] = value.strip()
+  return config
+
 
 def get_model_size(model):
     param_size = 0
@@ -147,7 +160,8 @@ def msg_process(msg):
     time_start = time.strftime("%Y-%m-%d %H:%M:%S")
     print('msg', type(msg))
 
-
+    # test_value = list(map(lambda x:json.loads(x.value())['test'], msg))
+    # true_value = list(map(lambda x:json.loads(x.value())['truth'], msg))
 
     loaded_js = json.loads(msg.value())
 
@@ -235,7 +249,7 @@ def msg_process(msg):
         mae_error = cal_mae(test_X, true_X, test_mask)
         print('mae_error', mae_error)
 
-        mse_eror = cal_rmse(test_X, true_X, test_mask)
+        mse_eror = cal_rmse(test_X, true_X, test_mask)  # calculate mean absolute error on the ground truth (artificially-missing values)
 
         mre_error = cal_mre(test_X, true_X, test_mask)
 
@@ -256,6 +270,7 @@ def msg_process(msg):
             left_test_value = window_data.pop(0)
             left_1 = test_value_list.pop(0)
             left_2 = true_value_list.pop(0)
+        # print(f'current indexxx:{index}, remaininig window list, test list, true list:', len(window_data), len(test_value_list), len(true_value_list))
 
 if __name__ == "__main__":
     tracemalloc.start()
@@ -264,13 +279,15 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--topic', type=str, help='Name of the Kafka topic to stream.', default='my-stream')
+    period = 10
+    window_len = period + 40
 
-
+    # parser.add_argument('--method', type=str, default=f'mpin_p{period}', required=False, help='message propagation imputation network')
 
     parser.add_argument('--method', type=str, default=f'mpin', required=False, help='message propagation imputation network')
 
-    # parser.add_argument("--window_len", type=int, default=window_len)
-    parser.add_argument("--p", type=int, default=10)
+    parser.add_argument("--window_len", type=int, default=window_len)
+    parser.add_argument("--period", type=int, default=period)
 
     parser.add_argument("--tau", type=int, default=5)
 
@@ -307,11 +324,8 @@ if __name__ == "__main__":
     model_size = None
 
     args = parser.parse_args()
-
-    period = args.p
-    window_len = period + 150
-
-    window_len = copy.copy(window_len)
+    window_len = args.window_len
+    period = args.period
 
 
     adj = np.zeros((window_len, window_len))
@@ -325,9 +339,16 @@ if __name__ == "__main__":
     device = torch.device('cpu')
     epochs = args.epochs
     dt_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    conf = {'bootstrap.servers': 'localhost:9092',
-            'default.topic.config': {'auto.offset.reset': 'smallest'},
-            'group.id':args.method} #'_'.join([args.method, dt_str])
+
+    # conf = {'bootstrap.servers': 'localhost:9092',
+    #         'default.topic.config': {'auto.offset.reset': 'smallest'},
+    #         'group.id':args.method} #'_'.join([args.method, dt_str])
+
+    conf = read_config()
+
+    conf["group.id"] = args.method
+    conf["auto.offset.reset"] = "earliest"
+
 
     consumer = Consumer(conf)
     running = True
@@ -335,7 +356,8 @@ if __name__ == "__main__":
     try:
         while running:
             consumer.subscribe([args.topic])
-
+            # msg = consumer.consume(num_messages=6, timeout=-1)
+            # msg = consumer.consume(num_messages=1, timeout=-1)
             msg = consumer.poll(3)
             if msg is None or msg == []:
                 print('waiting...')
@@ -343,9 +365,11 @@ if __name__ == "__main__":
                     print('done!!! time:', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                     perform_stream = [mae_error_stream, mse_error_stream, mre_error_stream, elapsed_time_list]
                     perform_stream_df = pd.DataFrame(perform_stream, index=['mae', 'rmse', 'mre', 'time'], columns=index_stream).T
-                    # perform_stream_df.to_csv(f'./exp_results_detail/per_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}_tau_{args.tau}_epoch_{args.epochs}.csv', sep='\t', index=True, header=True)
+                    perform_stream_df.to_csv(f'./exp_results_detail/per_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}_tau_{args.tau}_epoch_{args.epochs}.csv', sep='\t', index=True, header=True)
                     avg_df = perform_stream_df.mean(axis=0).round(3)
+                    # avg_df = perform_stream_df.iloc[100-args.window_len:, :].mean(axis=0).round(3)
                     avg_df = pd.DataFrame(avg_df).T
+                    # index_st = perform_stream_df.index[0] + 100-args.window_len
                     index_st = perform_stream_df.index[0]
                     index_ed = perform_stream_df.index[-1]
                     index_range = str(index_st) + '-' + str(index_ed)
@@ -368,7 +392,7 @@ if __name__ == "__main__":
 
                     imputed_data_arr = np.concatenate(imputed_data_stream, axis=0)
                     imputed_data_df = pd.DataFrame(imputed_data_arr, index=total_index_stream)
-                    # imputed_data_df.to_csv(f'./impute_detail/impu_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}_tau_{args.tau}_epoch_{args.epochs}.csv',sep='\t', index=True, header=False)
+                    imputed_data_df.to_csv(f'./impute_detail/impu_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}_tau_{args.tau}_epoch_{args.epochs}.csv',sep='\t', index=True, header=False)
                     break
 
 
@@ -381,19 +405,13 @@ if __name__ == "__main__":
                 elif msg.error():
                     raise KafkaException(msg.error())
             else:
-
                 flag = 1
                 tracker.start_task("imputation")
                 msg_process(msg)
                 emissions_infos = tracker.stop_task("imputation")
                 energy_consume_list.append(round(emissions_infos.energy_consumed, 8))
-
-
-
     except KeyboardInterrupt:
         print('perceived keyboard interrupt!!')
-
-
     finally:
         # Close down consumer to commit final offsets.
         print('perceive close information!')

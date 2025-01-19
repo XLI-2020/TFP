@@ -24,7 +24,17 @@ from fancyimpute import MatrixFactorization, SoftImpute, BiScaler, IterativeSVD
 from sklearn.impute import SimpleImputer, KNNImputer, IterativeImputer
 from codecarbon import EmissionsTracker
 
-
+def read_config():
+  # reads the client configuration from client.properties
+  # and returns it as a key-value map
+  config = {}
+  with open("client.properties") as fh:
+    for line in fh:
+      line = line.strip()
+      if len(line) != 0 and line[0] != "#":
+        parameter, value = line.strip().split('=', 1)
+        config[parameter] = value.strip()
+  return config
 
 def process_memory():
     process = psutil.Process(os.getpid())
@@ -106,10 +116,20 @@ def msg_process(msg):
 
         st = datetime.now()
 
-        X_input = copy.deepcopy(X)
-
-        MF_imputer = MatrixFactorization()
-        X_imputed = MF_imputer.fit_transform(X_input)
+        if args.method.startswith('MF'):
+            concrete_meth = args.method.split('-')[-1]
+            X_input = copy.deepcopy(X)
+            # X_input[np.where(X_mask == 1)] = np.nan
+            # X_input[np.where(X_mask == 0)] = np.nan
+            if concrete_meth == 'soft':
+                MF_imputer = SoftImpute()
+            elif concrete_meth == 'bi':
+                MF_imputer = BiScaler()
+            elif concrete_meth == 'iter':
+                MF_imputer = IterativeSVD()
+            elif concrete_meth == 'mf':
+                MF_imputer = MatrixFactorization()
+            X_imputed = MF_imputer.fit_transform(X_input)
 
         current_time = datetime.now()
         elapsed_time = (current_time - st).total_seconds()*1000
@@ -121,18 +141,22 @@ def msg_process(msg):
 
         true_X = copy.copy(true_value)
         true_X = np.nan_to_num(true_X, nan=0)
+        # true_X = torch.FloatTensor(true_X).to(device)
+        # print('true X tensor:', true_X)
 
+        # test_mask = torch.FloatTensor(test_mask).to(device)
         print('test_X true_X shpppp', test_X.shape, true_X.shape)
         mae_error = cal_mae(test_X, true_X, test_mask)
 
-        mse_eror = cal_rmse(test_X, true_X, test_mask)
+        mse_eror = cal_rmse(test_X, true_X, test_mask)  # calculate mean absolute error on the ground truth (artificially-missing values)
 
         mre_error = cal_mre(test_X, true_X, test_mask)
 
         print('valid impute value samples:', (test_X[np.where(test_mask == 1)][:10]))
         print('valid true value samples:', (true_X[np.where(test_mask == 1)][:10]))
 
-
+        # print('valid impute value samples:', (test_X[torch.where(test_mask == 1)][:10]))
+        # print('valid true value samples:', (true_X[torch.where(test_mask == 1)][:10]))
 
         mae_error_stream.append(round(mae_error.item(), 4))
         mse_error_stream.append(round(mse_eror.item(), 4))
@@ -159,13 +183,20 @@ if __name__ == "__main__":
     parser.add_argument('--topic', type=str, help='Name of the Kafka topic to stream.', default='my-stream')
     parser.add_argument("--k", type=int, default=3)
 
-    parser.add_argument('--method', type=str, default=f'MF', required=False, help='feature propagation')
+    period = 10
+
+    window = period + 40
+
+
+    # parser.add_argument('--method', type=str, default=f'MF-mf_p{period}', required=False, help='feature propagation')
+
+    parser.add_argument('--method', type=str, default=f'MF-mf', required=False, help='feature propagation')
 
 
     parser.add_argument('--prefix', type=str, default='', required=False, help='')
-    # parser.add_argument("--window_len", type=int, default=window)
+    parser.add_argument("--window_len", type=int, default=window)
 
-    parser.add_argument("--p", type=int, default=10)
+    parser.add_argument("--period", type=int, default=period)
 
 
     window_data = []
@@ -187,18 +218,21 @@ if __name__ == "__main__":
     miss_ratio = None
 
     args = parser.parse_args()
-    period = args.p
-
-    window = period + 150
-
-    window_len = copy.copy(window)
+    window_len = args.window_len
+    period = args.period
 
 
     torch.random.manual_seed(2021)
     device = torch.device('cpu')
-    conf = {'bootstrap.servers': 'localhost:9092',
-            'default.topic.config': {'auto.offset.reset': 'smallest'},
-            'group.id': args.method}
+
+    # conf = {'bootstrap.servers': 'localhost:9092',
+    #         'default.topic.config': {'auto.offset.reset': 'smallest'},
+    #         'group.id': args.method}
+    conf = read_config()
+
+    conf["group.id"] = args.method
+    conf["auto.offset.reset"] = "earliest"
+
     consumer = Consumer(conf)
     running = True
     flag = 0
@@ -215,7 +249,7 @@ if __name__ == "__main__":
                     print('done!!! time:', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                     perform_stream = [mae_error_stream, mse_error_stream, mre_error_stream, elapsed_time_list]
                     perform_stream_df = pd.DataFrame(perform_stream, index=['mae', 'rmse', 'mre', 'time'], columns=index_stream).T
-                    # perform_stream_df.to_csv(f'./exp_results_detail/per_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv', sep='\t', index=True, header=True)
+                    perform_stream_df.to_csv(f'./exp_results_detail/per_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv', sep='\t', index=True, header=True)
                     avg_df = perform_stream_df.mean(axis=0).round(3)
                     avg_df = pd.DataFrame(avg_df).T
                     index_st = perform_stream_df.index[0]
@@ -232,11 +266,11 @@ if __name__ == "__main__":
                     avg_df['total_energy'] = round(sum(energy_consume_list), 6)
                     avg_df['avg_energy'] = round(np.average(energy_consume_list), 8)
 
-                    # avg_df.to_csv(f'./exp_results/{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv', sep=',', index=True, header=True)
+                    avg_df.to_csv(f'./exp_results/{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv', sep=',', index=True, header=True)
 
                     imputed_data_arr = np.concatenate(imputed_data_stream, axis=0)
                     imputed_data_df = pd.DataFrame(imputed_data_arr, index=total_index_stream)
-                    # imputed_data_df.to_csv(f'./impute_detail/impu_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv', sep='\t', index=True, header=False)
+                    imputed_data_df.to_csv(f'./impute_detail/impu_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv', sep='\t', index=True, header=False)
 
                     break
             elif msg.error():

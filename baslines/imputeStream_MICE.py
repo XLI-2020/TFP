@@ -20,6 +20,17 @@ from codecarbon import EmissionsTracker
 from fancyimpute import MatrixFactorization, SoftImpute, BiScaler, IterativeSVD
 from sklearn.impute import SimpleImputer, KNNImputer, IterativeImputer
 
+def read_config():
+  # reads the client configuration from client.properties
+  # and returns it as a key-value map
+  config = {}
+  with open("client.properties") as fh:
+    for line in fh:
+      line = line.strip()
+      if len(line) != 0 and line[0] != "#":
+        parameter, value = line.strip().split('=', 1)
+        config[parameter] = value.strip()
+  return config
 
 def process_memory():
     process = psutil.Process(os.getpid())
@@ -105,9 +116,22 @@ def msg_process(msg):
         # X_input[np.where(X_mask == 0)] = np.nan
 
         imputer = IterativeImputer(random_state=12)
-
-        imputer = imputer.fit(X_input)
-        X_imputed = imputer.transform(X_input)
+        if dataset in ['chlorine']:
+            X_cols = X_input.shape[1]
+            batch_size = 10
+            nb_ft_bs = (X_cols + batch_size - 1) // batch_size
+            x_mice_col_list = []
+            for j in range(nb_ft_bs):
+                print('j:,{j}'.format(j=j))
+                x = X_input[:, j * batch_size: (j + 1) * batch_size]
+                print('x shape', x.shape)
+                x_mice_col = imputer.fit_transform(x)
+                print('x_mice_col shape', x_mice_col.shape)
+                x_mice_col_list.append(x_mice_col)
+            X_imputed = np.concatenate(x_mice_col_list, axis=1)
+        else:
+            imputer = imputer.fit(X_input)
+            X_imputed = imputer.transform(X_input)
 
         current_time = datetime.now()
         elapsed_time = (current_time - st).total_seconds()*1000
@@ -118,11 +142,14 @@ def msg_process(msg):
 
         true_X = copy.copy(true_value)
         true_X = np.nan_to_num(true_X, nan=0)
+        # true_X = torch.FloatTensor(true_X).to(device)
+        # print('true X tensor:', true_X)
 
+        # test_mask = torch.FloatTensor(test_mask).to(device)
         print('test_X true_X shpppp', test_X.shape, true_X.shape)
         mae_error = cal_mae(test_X, true_X, test_mask)
 
-        mse_eror = cal_rmse(test_X, true_X, test_mask)
+        mse_eror = cal_rmse(test_X, true_X, test_mask)  # calculate mean absolute error on the ground truth (artificially-missing values)
 
         mre_error = cal_mre(test_X, true_X, test_mask)
 
@@ -157,12 +184,18 @@ if __name__ == "__main__":
     parser.add_argument("--k", type=int, default=3)
 
 
+    period = 10
+
+    window = period + 40
+
+    # parser.add_argument('--method', type=str, default=f'MICE_p{period}', required=False, help='feature propagation')
+
     parser.add_argument('--method', type=str, default=f'MICE', required=False, help='feature propagation')
 
 
     parser.add_argument('--prefix', type=str, default='', required=False, help='')
-    parser.add_argument("--p", type=int, default=10)
-    # parser.add_argument("--window_len", type=int, default=window)
+    parser.add_argument("--period", type=int, default=period)
+    parser.add_argument("--window_len", type=int, default=window)
 
 
 
@@ -185,19 +218,21 @@ if __name__ == "__main__":
     miss_ratio = None
 
     args = parser.parse_args()
-
-    period = args.p
-
-    window = period + 150
-
-    window_len = copy.copy(window)
+    window_len = args.window_len
+    period = args.period
 
 
     torch.random.manual_seed(2021)
     device = torch.device('cpu')
-    conf = {'bootstrap.servers': 'localhost:9092',
-            'default.topic.config': {'auto.offset.reset': 'smallest'},
-            'group.id': args.method}
+    # conf = {'bootstrap.servers': 'localhost:9092',
+    #         'default.topic.config': {'auto.offset.reset': 'smallest'},
+    #         'group.id': args.method}
+
+    conf = read_config()
+
+    conf["group.id"] = args.method
+    conf["auto.offset.reset"] = "earliest"
+
     consumer = Consumer(conf)
     running = True
     flag = 0
@@ -215,7 +250,7 @@ if __name__ == "__main__":
                     perform_stream = [mae_error_stream, mse_error_stream, mre_error_stream, elapsed_time_list]
                     perform_stream_df = pd.DataFrame(perform_stream, index=['mae', 'rmse', 'mre', 'time'], columns=index_stream).T
 
-                    # perform_stream_df.to_csv(f'./exp_results_detail/per_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv', sep='\t', index=True, header=True)
+                    perform_stream_df.to_csv(f'./exp_results_detail/per_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv', sep='\t', index=True, header=True)
                     avg_df = perform_stream_df.mean(axis=0).round(3)
                     avg_df = pd.DataFrame(avg_df).T
                     index_st = perform_stream_df.index[0]
@@ -236,7 +271,7 @@ if __name__ == "__main__":
 
                     imputed_data_arr = np.concatenate(imputed_data_stream, axis=0)
                     imputed_data_df = pd.DataFrame(imputed_data_arr, index=total_index_stream)
-                    # imputed_data_df.to_csv(f'./impute_detail/impu_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv',sep='\t', index=True, header=False)
+                    imputed_data_df.to_csv(f'./impute_detail/impu_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}.csv',sep='\t', index=True, header=False)
 
                     break
             elif msg.error():

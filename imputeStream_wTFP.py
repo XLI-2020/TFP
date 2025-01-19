@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Consumes stream and conduct imputation at each window using wTFP.
+"""Consumes stream for printing all messages to the console.
 """
 import tracemalloc
 import argparse
@@ -14,6 +14,7 @@ import resource
 import torch
 from resource import *
 import psutil
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from pypots.utils.metrics import cal_mae, cal_rmse, cal_mre
 from torch_geometric.data import Data
 from torch_geometric.nn import knn_graph, radius_graph
@@ -21,8 +22,23 @@ import random
 import copy
 from datetime import datetime
 import os
+from torch_geometric.utils.convert import from_scipy_sparse_matrix
 from torch_geometric.transforms import FeaturePropagation
 from codecarbon import EmissionsTracker
+
+
+def read_config():
+  # reads the client configuration from client.properties
+  # and returns it as a key-value map
+  config = {}
+  with open("client.properties") as fh:
+    for line in fh:
+      line = line.strip()
+      if len(line) != 0 and line[0] != "#":
+        parameter, value = line.strip().split('=', 1)
+        config[parameter] = value.strip()
+  return config
+
 
 def process_memory():
     process = psutil.Process(os.getpid())
@@ -45,6 +61,9 @@ def msg_process(msg):
     # Print the current time and the message.
     time_start = time.strftime("%Y-%m-%d %H:%M:%S")
     print('msg', type(msg))
+
+    # test_value = list(map(lambda x:json.loads(x.value())['test'], msg))
+    # true_value = list(map(lambda x:json.loads(x.value())['truth'], msg))
 
     loaded_js = json.loads(msg.value())
 
@@ -94,8 +113,11 @@ def msg_process(msg):
 
         X = torch.FloatTensor(X).to(device)
         X_mask = torch.LongTensor(X_mask).to(device)
+
         X_imputed = copy.copy(X)
 
+
+        # norm_adj = torch.LongTensor(adj)
 
         norm_adj = torch.FloatTensor(adj)
         print('norm adj', norm_adj, norm_adj.shape)
@@ -107,6 +129,7 @@ def msg_process(msg):
         print('edge_weight', edge_weight, edge_weight.shape)
         data = Data(x=X_imputed, edge_index=edge_index, edge_attr=edge_weight)
 
+        # data = Data(x=X_imputed, adj_t=norm_adj)
         # edge_index = knn_graph(X_imputed, args.k, batch=None, loop=False)
         # data = Data(x=X_imputed, edge_index=edge_index)
         # print('edge index', edge_index, edge_index.shape)
@@ -133,12 +156,12 @@ def msg_process(msg):
 
         test_mask = torch.FloatTensor(test_mask).to(device)
 
-        mae_error = cal_mae(test_X, true_X, test_mask)
+        mae_error = calc_mae(test_X, true_X, test_mask)
         print('mae_error', mae_error)
 
-        mse_eror = cal_rmse(test_X, true_X, test_mask)
+        mse_eror = calc_rmse(test_X, true_X, test_mask)  # calculate mean absolute error on the ground truth (artificially-missing values)
 
-        mre_error = cal_mre(test_X, true_X, test_mask)
+        mre_error = calc_mre(test_X, true_X, test_mask)
 
         print('valid impute value samples:', (test_X[torch.where(test_mask == 1)][:10]))
         print('valid true value samples:', (true_X[torch.where(test_mask == 1)][:10]))
@@ -158,22 +181,22 @@ def msg_process(msg):
 
 if __name__ == "__main__":
     tracemalloc.start()
-
     tracker = EmissionsTracker(project_name="imputation", save_to_file=False)
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--topic', type=str, help='Name of the Kafka topic to stream.', default='my-stream')
     parser.add_argument("--epochs", type=int, default=100)
-    # parser.add_argument("--k", type=int, default=10)
+    # parser.add_argument("--k", type=int, default=3)
 
+    period = 10
+    window = period + 40
 
+    # parser.add_argument('--method', type=str, default=f'fp_p{period}', required=False, help='feature propagation')
+    parser.add_argument('--method', type=str, default=f'fp', required=False, help='feature propagation')
 
-
-    parser.add_argument('--method', type=str, default=f'wTFP', required=False, help='feature propagation')
-
-    # parser.add_argument("--window_len", type=int, default=window)
+    parser.add_argument("--window_len", type=int, default=window)
     parser.add_argument("--tau", type=int, default=5)
-    parser.add_argument("--p", type=int, default=10)
+    parser.add_argument("--period", type=int, default=period)
     parser.add_argument('--prefix', type=str, default='', required=False, help='')
 
     window_data = []
@@ -197,12 +220,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    period = args.p
-    window = period + 40
-    window_len = copy.copy(window)
+    window_len = args.window_len
+    period = args.period
 
-    # precomputing adjacency matrix
     adj = np.zeros((window_len, window_len))
+
     for i in range(window_len):
         adj[i, i + 1:i + 1 + args.tau] = 1
         adj[i + 1:i + 1 + args.tau, i] = 1
@@ -212,15 +234,24 @@ if __name__ == "__main__":
     device = torch.device('cpu')
     epochs = args.epochs
     dt_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    conf = {'bootstrap.servers': 'localhost:9092',
-            'default.topic.config': {'auto.offset.reset': 'smallest'},
-            'group.id':args.method} #'_'.join([args.method, dt_str])
+    # conf = {'bootstrap.servers': 'localhost:9092',
+    #         'default.topic.config': {'auto.offset.reset': 'smallest'},
+    #         'group.id':args.method} #'_'.join([args.method, dt_str])
+
+    conf = read_config()
+
+    conf["group.id"] = args.method
+    conf["auto.offset.reset"] = "earliest"
+
+    # creates a new consumer instance
     consumer = Consumer(conf)
     running = True
     flag = 0
     try:
         while running:
             consumer.subscribe([args.topic])
+            # msg = consumer.consume(num_messages=p, timeout=-1)
+            # msg = consumer.consume(num_messages=1, timeout=-1)
             msg = consumer.poll(3)
             if msg is None or msg == []:
                 print('waiting...')
@@ -228,9 +259,11 @@ if __name__ == "__main__":
                     print('done!!! time:', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                     perform_stream = [mae_error_stream, mse_error_stream, mre_error_stream, elapsed_time_list]
                     perform_stream_df = pd.DataFrame(perform_stream, index=['mae', 'rmse', 'mre', 'time'], columns=index_stream).T
-                    # perform_stream_df.to_csv(f'./exp_results_detail/per_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}_tau_{args.tau}_epoch_{args.epochs}.csv', sep='\t', index=True, header=True)
+                    perform_stream_df.to_csv(f'./exp_results_detail/per_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}_tau_{args.tau}_epoch_{args.epochs}.csv', sep='\t', index=True, header=True)
                     avg_df = perform_stream_df.mean(axis=0).round(3)
+                    # avg_df = perform_stream_df.iloc[100-args.window_len:, :].mean(axis=0).round(3)
                     avg_df = pd.DataFrame(avg_df).T
+                    # index_st = perform_stream_df.index[0] + 100-args.window_len
                     index_st = perform_stream_df.index[0]
                     index_ed = perform_stream_df.index[-1]
                     index_range = str(index_st) + '-' + str(index_ed)
@@ -249,7 +282,7 @@ if __name__ == "__main__":
 
                     imputed_data_arr = np.concatenate(imputed_data_stream, axis=0)
                     imputed_data_df = pd.DataFrame(imputed_data_arr, index=total_index_stream)
-                    # imputed_data_df.to_csv( f'./impute_detail/impu_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}_tau_{args.tau}_epoch_{args.epochs}.csv', sep='\t', index=True, header=False)
+                    imputed_data_df.to_csv( f'./impute_detail/impu_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}_tau_{args.tau}_epoch_{args.epochs}.csv', sep='\t', index=True, header=False)
                     break
 
             elif msg.error():
@@ -270,12 +303,13 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print('perceived keyboard interrupt!!')
+
+
     finally:
         # Close down consumer to commit final offsets.
         print('perceive close information!')
 
         consumer.close()
-
 
 
 

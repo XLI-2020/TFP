@@ -25,7 +25,17 @@ import tracemalloc
 import os
 from codecarbon import EmissionsTracker
 
-
+def read_config():
+  # reads the client configuration from client.properties
+  # and returns it as a key-value map
+  config = {}
+  with open("client.properties") as fh:
+    for line in fh:
+      line = line.strip()
+      if len(line) != 0 and line[0] != "#":
+        parameter, value = line.strip().split('=', 1)
+        config[parameter] = value.strip()
+  return config
 
 def process_memory():
     process = psutil.Process(os.getpid())
@@ -163,12 +173,15 @@ if __name__ == "__main__":
     parser.add_argument('--topic', type=str, help='Name of the Kafka topic to stream.', default='my-stream')
     parser.add_argument("--k", type=int, default=3)
 
+    period = 10
 
+    window = period + 40
 
+    # parser.add_argument('--method', type=str, default=f'MEAN_p{period}', required=False, help='feature propagation')
     parser.add_argument('--method', type=str, default=f'MEAN', required=False, help='feature propagation')
 
-    # parser.add_argument("--window_len", type=int, default=window)
-    parser.add_argument("--p", type=int, default=10)
+    parser.add_argument("--window_len", type=int, default=window)
+    parser.add_argument("--period", type=int, default=period)
 
     parser.add_argument('--prefix', type=str, default='', required=False, help='')
 
@@ -189,19 +202,24 @@ if __name__ == "__main__":
     miss_ratio = None
 
     args = parser.parse_args()
-
-    period = args.p
-
-    window = period + 150
-    window_len = copy.copy(window)
+    window_len = args.window_len
+    period = args.period
 
 
     torch.random.manual_seed(2021)
     device = torch.device('cpu')
     dt_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    conf = {'bootstrap.servers': 'localhost:9092',
-            'default.topic.config': {'auto.offset.reset': 'smallest'},
-            'group.id':args.method} #'_'.join([args.method, dt_str])
+
+    # conf = {'bootstrap.servers': 'localhost:9092',
+    #         'default.topic.config': {'auto.offset.reset': 'smallest'},
+    #         'group.id':args.method} #'_'.join([args.method, dt_str])
+
+    conf = read_config()
+
+    conf["group.id"] = args.method
+    conf["auto.offset.reset"] = "earliest"
+
+
     consumer = Consumer(conf)
     running = True
     flag = 0

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Impute data stream with BRITS
+"""Consumes stream for printing all messages to the console.
 """
 import argparse
 import json
@@ -18,12 +18,29 @@ import copy
 from datetime import datetime
 import tracemalloc
 import os
-from pypots.data import  masked_fill
+from torch_geometric.utils.convert import from_scipy_sparse_matrix
+from pypots.data import load_specific_dataset, mcar, masked_fill
 from pypots.imputation import BRITS
 import torch
-from pypots.utils.metrics import cal_mae, cal_rmse, cal_mre
+import torch.nn.functional as F
+from argparse import ArgumentParser
+from pypots.utils.metrics import calc_mae, calc_rmse, calc_mre
 import sys
 from codecarbon import EmissionsTracker
+
+
+def read_config():
+  # reads the client configuration from client.properties
+  # and returns it as a key-value map
+  config = {}
+  with open("client.properties") as fh:
+    for line in fh:
+      line = line.strip()
+      if len(line) != 0 and line[0] != "#":
+        parameter, value = line.strip().split('=', 1)
+        config[parameter] = value.strip()
+  return config
+
 
 def get_model_size(model):
     param_size = 0
@@ -61,6 +78,9 @@ def msg_process(msg):
     # Print the current time and the message.
     time_start = time.strftime("%Y-%m-%d %H:%M:%S")
     print('msg', type(msg))
+
+    # test_value = list(map(lambda x:json.loads(x.value())['test'], msg))
+    # true_value = list(map(lambda x:json.loads(x.value())['truth'], msg))
 
     loaded_js = json.loads(msg.value())
 
@@ -110,12 +130,24 @@ def msg_process(msg):
         X = torch.FloatTensor(X).to(device)
         X_mask = torch.LongTensor(X_mask).to(device)
 
+        norm_adj = torch.FloatTensor(adj)
+
+        edge_index_hori = norm_adj.nonzero()
+        print('edge_index_hori', edge_index_hori)
+
+        edge_weight = norm_adj[edge_index_hori[:,0], edge_index_hori[:,1]]
+
+        edge_index = edge_index_hori.t().contiguous()
+
+        print('edge index', edge_index, edge_index.shape)
+        print('edge_weight', edge_weight, edge_weight.shape)
 
         X = masked_fill(X, X_mask, np.nan)
         num_of_channel = X.shape[1]
         X = torch.unsqueeze(X, dim=0)
 
-        # Model training. This is from PyPOTS.
+        # Model training. This is PyPOTS showtime.
+
         imputer = BRITS(n_steps=args.window_len, n_features=num_of_channel, rnn_hidden_size=64, epochs=50, device=device)
 
         st = datetime.now()
@@ -135,6 +167,7 @@ def msg_process(msg):
         print('X_imputed shp:', X_imputed.shape, type(X_imputed))
 
         test_X = X_imputed[-period:,:]
+        # raw_test_X = raw_out[[-1]]
 
         true_X = copy.copy(true_value)
         true_X = np.nan_to_num(true_X, nan=0)
@@ -142,12 +175,12 @@ def msg_process(msg):
 
         test_mask = torch.FloatTensor(test_mask).to(device)
 
-        mae_error = cal_mae(test_X, true_X, test_mask)
+        mae_error = calc_mae(test_X, true_X, test_mask)
         print('mae_error', mae_error)
 
-        mse_eror = cal_rmse(test_X, true_X, test_mask)
+        mse_eror = calc_rmse(test_X, true_X, test_mask)  # calculate mean absolute error on the ground truth (artificially-missing values)
 
-        mre_error = cal_mre(test_X, true_X, test_mask)
+        mre_error = calc_mre(test_X, true_X, test_mask)
 
         print('valid impute value samples:', (test_X[torch.where(test_mask == 1)][:10]))
         print('valid true value samples:', (true_X[torch.where(test_mask == 1)][:10]))
@@ -183,11 +216,16 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=100)
 
 
+    period = 10
+    window = period + 40
+    # parser.add_argument('--method', type=str, default=f'brits_p{period}', required=False, help='feature propagation')
     parser.add_argument('--method', type=str, default=f'brits', required=False, help='feature propagation')
 
-    # parser.add_argument("--window_len", type=int, default=window)
+    parser.add_argument("--window_len", type=int, default=window)
 
-    parser.add_argument("--p", type=int, default=10)
+    parser.add_argument("--period", type=int, default=period)
+
+    parser.add_argument("--tau", type=int, default=5)
 
 
     parser.add_argument('--prefix', type=str, default='', required=False, help='')
@@ -211,18 +249,31 @@ if __name__ == "__main__":
     model_size = None
 
     args = parser.parse_args()
+    window_len = args.window_len
+    period = args.period
 
-    period = args.p
-    window = period + 150
-    window_len = copy.copy(window)
+
+    adj = np.zeros((window_len, window_len))
+
+    for i in range(window_len):
+        adj[i, i + 1:i + 1 + args.tau] = 1
+        adj[i + 1:i + 1 + args.tau, i] = 1
+
 
     torch.random.manual_seed(2021)
     device = torch.device('cpu')
     epochs = args.epochs
     dt_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    conf = {'bootstrap.servers': 'localhost:9092',
-            'default.topic.config': {'auto.offset.reset': 'smallest'},
-            'group.id':args.method} #'_'.join([args.method, dt_str])
+
+    # conf = {'bootstrap.servers': 'localhost:9092',
+    #         'default.topic.config': {'auto.offset.reset': 'smallest'},
+    #         'group.id':args.method} #'_'.join([args.method, dt_str])
+
+    conf = read_config()
+
+    conf["group.id"] = args.method
+    conf["auto.offset.reset"] = "earliest"
+
     consumer = Consumer(conf)
     running = True
     flag = 0
@@ -239,9 +290,11 @@ if __name__ == "__main__":
                     print('done!!! time:', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                     perform_stream = [mae_error_stream, mse_error_stream, mre_error_stream, elapsed_time_list]
                     perform_stream_df = pd.DataFrame(perform_stream, index=['mae', 'rmse', 'mre', 'time'], columns=index_stream).T
-                    # perform_stream_df.to_csv(f'./exp_results_detail/per_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}_epoch_{args.epochs}.csv', sep='\t', index=True, header=True)
+                    perform_stream_df.to_csv(f'./exp_results_detail/per_{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}_epoch_{args.epochs}.csv', sep='\t', index=True, header=True)
                     avg_df = perform_stream_df.mean(axis=0).round(3)
+                    # avg_df = perform_stream_df.iloc[100-args.window_len:, :].mean(axis=0).round(3)
                     avg_df = pd.DataFrame(avg_df).T
+                    # index_st = perform_stream_df.index[0] + 100-args.window_len
                     index_st = perform_stream_df.index[0]
                     index_ed = perform_stream_df.index[-1]
                     index_range = str(index_st) + '-' + str(index_ed)
@@ -260,6 +313,7 @@ if __name__ == "__main__":
 
 
                     avg_df.to_csv(f'./exp_results/{dataset}_{args.method}_ratio_{miss_ratio}_seq_{seq_len}_period_{period}_win_{window_len}_epoch_{args.epochs}.csv', sep=',', index=True, header=True)
+
                     # imputed_data_arr = np.concatenate(imputed_data_stream, axis=0)
                     # imputed_data_df = pd.DataFrame(imputed_data_arr, index=index_stream)
                     # imputed_data_df.to_csv( f'./impute_detail/impu_{dataset}_ratio_{miss_ratio}_seq_{seq_len}_win_{window_len}_epoch_{args.epochs}.csv', sep='\t', index=True, header=False)
