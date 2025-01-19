@@ -87,9 +87,11 @@ However, they can be changed as well from the script entrance if needs arise.
 
 
 
-### Acknowledgements
+[//]: # (### Acknowledgements)
 
-We appreciate the work of SAITS, and their contributed codes available in [here](https://github.com/WenjieDu/SAITS). We are also grateful for the repository 
-[here](https://github.com/XLI-2020/time-series-kafka-demo) to facilitate the creation of sensor data streams using Kafka.
+[//]: # ()
+[//]: # (We appreciate the work of SAITS, and their contributed codes available in [here]&#40;https://github.com/WenjieDu/SAITS&#41;. We are also grateful for the repository )
+
+[//]: # ([here]&#40;https://github.com/XLI-2020/time-series-kafka-demo&#41; to facilitate the creation of sensor data streams using Kafka.)
 
 
