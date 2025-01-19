@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 # from utils.utils import get_activation
 
+
 def get_activation(activation):
     if activation == 'relu':
         return torch.nn.ReLU()

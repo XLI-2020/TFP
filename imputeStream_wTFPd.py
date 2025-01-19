@@ -135,12 +135,6 @@ def msg_process(msg):
             adj[i, i + 1:i + 1 + tau] = 1
             adj[i + 1:i + 1 + tau, i] = 1
 
-        # for i in range(window_len):
-        #     min_end = min(i+1+tau, window_len)
-        #     for j in range(i+1, min_end):
-        #         adj[i, j] = 1
-
-
 
         norm_adj = torch.FloatTensor(adj)
         edge_index_hori = norm_adj.nonzero()
@@ -253,9 +247,7 @@ if __name__ == "__main__":
     device = torch.device('cpu')
     epochs = args.epochs
     dt_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    # conf = {'bootstrap.servers': 'localhost:9092',
-    #         'default.topic.config': {'auto.offset.reset': 'smallest'},
-    #         'group.id':args.method } #'_'.join([args.method, dt_str])
+
 
     conf = read_config()
 

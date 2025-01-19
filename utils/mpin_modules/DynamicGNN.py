@@ -15,8 +15,6 @@ import torch_geometric.nn as pyg_nn
 
 from torch_geometric.nn import knn_graph,radius_graph
 
-
-
 class DynamicGAT(pyg_nn.GATConv):
 
     def __init__(self, in_channels, out_channels, k=None, radius=None):

@@ -234,9 +234,7 @@ if __name__ == "__main__":
     device = torch.device('cpu')
     epochs = args.epochs
     dt_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    # conf = {'bootstrap.servers': 'localhost:9092',
-    #         'default.topic.config': {'auto.offset.reset': 'smallest'},
-    #         'group.id':args.method} #'_'.join([args.method, dt_str])
+
 
     conf = read_config()
 
